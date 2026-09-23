@@ -4,6 +4,9 @@
 Runs a complete SSH handshake (banner, KEX, host key exchange) so
 scanners like Censys and Shodan see a real SSH server. All auth
 attempts are rejected -- no shell, no exec, no access.
+
+Algorithm lists are pinned to match Ubuntu 24.04's OpenSSH 9.6p1
+defaults, so the fingerprint is indistinguishable from a real server.
 """
 
 from __future__ import annotations
@@ -22,6 +25,55 @@ DEFAULT_HOST_KEYS = (
 
 # asyncssh prepends "SSH-2.0-" automatically, so do NOT include it here.
 DEFAULT_SERVER_VERSION = "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"
+
+# --- Algorithm lists matching Ubuntu 24.04 OpenSSH 9.6p1 defaults ---
+# Source: `sshd -T | grep -E '(kex|key|ciphers|macs)algorithms'`
+
+KEX_ALGS = [
+    # sntrup761x25519-sha512@openssh.com — может отсутствовать в старых
+    # сборках asyncssh. Если сервис не запустится, уберите эту строку.
+    "sntrup761x25519-sha512@openssh.com",
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+    "diffie-hellman-group-exchange-sha256",
+    "diffie-hellman-group16-sha512",
+    "diffie-hellman-group18-sha512",
+    "diffie-hellman-group14-sha256",
+]
+
+# signature_algs управляет алгоритмами подписи host key и аутентификации
+# по открытому ключу. Список соответствует OpenSSH 9.6p1 по умолчанию.
+SIGNATURE_ALGS = [
+    "ssh-ed25519",
+    "rsa-sha2-512",
+    "rsa-sha2-256",
+    "ecdsa-sha2-nistp256",
+]
+
+ENCRYPTION_ALGS = [
+    "chacha20-poly1305@openssh.com",
+    "aes128-ctr",
+    "aes192-ctr",
+    "aes256-ctr",
+    "aes128-gcm@openssh.com",
+    "aes256-gcm@openssh.com",
+]
+
+MAC_ALGS = [
+    "umac-64-etm@openssh.com",
+    "umac-128-etm@openssh.com",
+    "hmac-sha2-256-etm@openssh.com",
+    "hmac-sha2-512-etm@openssh.com",
+    "hmac-sha1-etm@openssh.com",
+    "umac-64@openssh.com",
+    "umac-128@openssh.com",
+    "hmac-sha2-256",
+    "hmac-sha2-512",
+    "hmac-sha1",
+]
 
 
 class RejectAuthServer(asyncssh.SSHServer):
@@ -75,4 +127,8 @@ async def start_ssh_server(
         server_host_keys=list(existing),
         server_version=server_version,
         encoding=None,
+        kex_algs=KEX_ALGS,
+        encryption_algs=ENCRYPTION_ALGS,
+        mac_algs=MAC_ALGS,
+        signature_algs=SIGNATURE_ALGS,
     )
