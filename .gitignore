@@ -55,3 +55,9 @@ htmlcov/
 # Local env
 .env
 .env.local
+
+# Certs
+certs/
+*.pem
+*.key
+*.crt

@@ -6,8 +6,8 @@
     "handler_read_timeout": 1.0
   },
   "tls": {
-    "cert_file": "/etc/letsencrypt/live/domain/fullchain.pem",
-    "key_file": "/etc/letsencrypt/live/domain/privkey.pem"
+    "cert_file": "/opt/mimic/certs/domain/fullchain.pem",
+    "key_file": "/opt/mimic/certs/domain/privkey.pem"
   },
   "services": [
     { "port": 2379,  "service": "etcd" },
