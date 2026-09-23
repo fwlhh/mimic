@@ -18,6 +18,7 @@ import logging
 import signal
 import ssl
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -38,11 +39,12 @@ LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
 
 def _setup_logging(level: str) -> None:
-    """Configure the root logger with a simple format."""
     logging.basicConfig(
         format=LOG_FORMAT,
         level=getattr(logging, level.upper(), logging.INFO),
     )
+    # asyncssh logs every handshake at INFO; that's too noisy.
+    logging.getLogger("asyncssh").setLevel(logging.WARNING)
 
 
 log = logging.getLogger("mimic")
@@ -59,6 +61,46 @@ PRESETS_DIR = BASE_DIR / "presets"
 DEFAULT_MAX_CONNS = 20
 DEFAULT_READ_TIMEOUT = 0.3
 DEFAULT_HANDLER_TIMEOUT = 1.0
+DEFAULT_RATE_LIMIT = 30           # new connections per IP per window
+DEFAULT_RATE_WINDOW = 60.0        # seconds
+DEFAULT_GLOBAL_CONNECTIONS = 200  # hard cap across all ports
+DEFAULT_SHUTDOWN_GRACE = 5.0      # seconds to wait for active conns
+DEFAULT_METRICS_INTERVAL = 60.0   # seconds between metric dumps
+DEFAULT_SSH_LOGIN_TIMEOUT = 30.0  # seconds for SSH handshake + auth
+
+
+# ============================================================
+# Global metrics
+# ============================================================
+
+class Metrics:
+    """Simple in-memory counters, dumped to the log periodically."""
+
+    def __init__(self) -> None:
+        self.started_at = time.monotonic()
+        self.total_connections = 0
+        self.active_connections = 0
+        self.rejected_rate = 0
+        self.rejected_limit = 0
+        self.per_port_total: dict[int, int] = {}
+
+    def snapshot(self) -> str:
+        uptime = int(time.monotonic() - self.started_at)
+        ports = ", ".join(
+            f"{port}={count}"
+            for port, count in sorted(self.per_port_total.items())
+        )
+        return (
+            f"uptime={uptime}s "
+            f"total={self.total_connections} "
+            f"active={self.active_connections} "
+            f"rejected_rate={self.rejected_rate} "
+            f"rejected_limit={self.rejected_limit} "
+            f"per_port=[{ports}]"
+        )
+
+
+metrics = Metrics()
 
 
 # ============================================================
@@ -88,8 +130,11 @@ class SpoofServer:
         max_conns: int = DEFAULT_MAX_CONNS,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         handler_timeout: float = DEFAULT_HANDLER_TIMEOUT,
+        rate_limit: int = DEFAULT_RATE_LIMIT,
+        rate_window: float = DEFAULT_RATE_WINDOW,
         ssh_full: bool = False,
         ssh_version: str = "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
+        ssh_login_timeout: float = DEFAULT_SSH_LOGIN_TIMEOUT,
     ) -> None:
         self.name = name
         self.port = port
@@ -103,12 +148,17 @@ class SpoofServer:
         self.max_conns = max_conns
         self.read_timeout = read_timeout
         self.handler_timeout = handler_timeout
+        self.rate_limit = rate_limit
+        self.rate_window = rate_window
         self.ssh_full = ssh_full
         self.ssh_version = ssh_version
+        self.ssh_login_timeout = ssh_login_timeout
         self.server: asyncio.AbstractServer | None = None
         self.ssl_context: ssl.SSLContext | None = None
         self.ssh_acceptor: Any = None
         self._connections: dict[str, int] = {}
+        self._recent: dict[str, list[float]] = {}
+        self._shutdown = asyncio.Event()
 
     # ---------- TLS ----------
 
@@ -132,6 +182,22 @@ class SpoofServer:
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         return ctx
 
+    # ---------- Rate limiting ----------
+
+    def _rate_limited(self, peer_ip: str) -> bool:
+        """Return True if this IP has exceeded the rate limit."""
+        now = time.monotonic()
+        cutoff = now - self.rate_window
+        recent = self._recent.get(peer_ip, [])
+        # Drop entries older than the window.
+        recent = [t for t in recent if t > cutoff]
+        if len(recent) >= self.rate_limit:
+            self._recent[peer_ip] = recent
+            return True
+        recent.append(now)
+        self._recent[peer_ip] = recent
+        return False
+
     # ---------- Static / handler modes ----------
 
     async def _handle_client(
@@ -142,6 +208,7 @@ class SpoofServer:
         peer = writer.get_extra_info("peername")
         peer_ip = peer[0] if peer else "unknown"
 
+        # Per-IP concurrent connection limit.
         count = self._connections.get(peer_ip, 0)
         if count >= self.max_conns:
             log.warning(
@@ -150,13 +217,28 @@ class SpoofServer:
                 self.port,
                 peer_ip,
             )
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
+            metrics.rejected_limit += 1
+            await self._close_writer(writer)
             return
+
+        # Per-IP rate limit.
+        if self._rate_limited(peer_ip):
+            log.warning(
+                "[%s:%d] dropping %s (rate limit)",
+                self.name,
+                self.port,
+                peer_ip,
+            )
+            metrics.rejected_rate += 1
+            await self._close_writer(writer)
+            return
+
         self._connections[peer_ip] = count + 1
+        metrics.total_connections += 1
+        metrics.active_connections += 1
+        metrics.per_port_total[self.port] = (
+            metrics.per_port_total.get(self.port, 0) + 1
+        )
 
         try:
             if self.handler is not None:
@@ -180,14 +262,11 @@ class SpoofServer:
             )
         finally:
             if not self.keep_open:
-                try:
-                    writer.close()
-                    await writer.wait_closed()
-                except Exception:
-                    pass
+                await self._close_writer(writer)
             self._connections[peer_ip] -= 1
             if self._connections[peer_ip] <= 0:
                 del self._connections[peer_ip]
+            metrics.active_connections -= 1
 
     async def _serve_handler(
         self,
@@ -224,6 +303,14 @@ class SpoofServer:
         writer.write(self.response)
         await writer.drain()
 
+    @staticmethod
+    async def _close_writer(writer: asyncio.StreamWriter) -> None:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
     # ---------- SSH full-handshake mode ----------
 
     async def _start_ssh(self) -> None:
@@ -240,6 +327,7 @@ class SpoofServer:
         self.ssh_acceptor = await start_ssh_server(
             port=self.port,
             server_version=self.ssh_version,
+            login_timeout=self.ssh_login_timeout,
         )
         log.info(
             "listening on :%d as %s [ssh-full]",
@@ -271,14 +359,22 @@ class SpoofServer:
             suffix,
         )
 
-    async def stop(self) -> None:
+    async def stop(self, grace: float = DEFAULT_SHUTDOWN_GRACE) -> None:
+        """Stop the server, waiting up to `grace` seconds for active
+        connections to drain."""
         if self.ssh_full and self.ssh_acceptor is not None:
             self.ssh_acceptor.close()
             await self.ssh_acceptor.wait_closed()
             return
+
         if self.server:
             self.server.close()
             await self.server.wait_closed()
+
+        # Wait for active connections to finish, up to `grace` seconds.
+        deadline = time.monotonic() + grace
+        while metrics.active_connections > 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
 
 
 # ============================================================
@@ -362,6 +458,15 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
     handler_timeout = float(
         settings.get("handler_read_timeout", DEFAULT_HANDLER_TIMEOUT)
     )
+    rate_limit = int(
+        settings.get("rate_limit_per_ip", DEFAULT_RATE_LIMIT)
+    )
+    rate_window = float(
+        settings.get("rate_window_seconds", DEFAULT_RATE_WINDOW)
+    )
+    ssh_login_timeout = float(
+        settings.get("ssh_login_timeout", DEFAULT_SSH_LOGIN_TIMEOUT)
+    )
 
     servers: list[SpoofServer] = []
     for raw in cfg.get("services", []):
@@ -390,11 +495,14 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
                 max_conns=max_conns,
                 read_timeout=read_timeout,
                 handler_timeout=handler_timeout,
+                rate_limit=rate_limit,
+                rate_window=rate_window,
                 ssh_full=ssh_full,
                 ssh_version=spec.get(
                     "ssh_version",
                     "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
                 ),
+                ssh_login_timeout=ssh_login_timeout,
             )
         )
     return servers
@@ -404,7 +512,14 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
 # Async runner
 # ============================================================
 
-async def run_servers(cfg: dict[str, Any]) -> None:
+async def _metrics_loop(interval: float) -> None:
+    """Log a metrics snapshot every `interval` seconds."""
+    while True:
+        await asyncio.sleep(interval)
+        log.info("[metrics] %s", metrics.snapshot())
+
+
+async def run_servers(cfg: dict[str, Any], cfg_path: Path) -> None:
     servers = build_servers(cfg)
     if not servers:
         raise SystemExit("No services configured")
@@ -416,21 +531,93 @@ async def run_servers(cfg: dict[str, Any]) -> None:
             started.append(srv)
         except OSError as exc:
             log.error("cannot bind :%d -- %s", srv.port, exc)
+        except Exception as exc:
+            log.error("failed to start :%d -- %s", srv.port, exc)
+
+    if not started:
+        raise SystemExit("No services started")
 
     stop_event = asyncio.Event()
+    reload_event = asyncio.Event()
 
     def _shutdown(*_: Any) -> None:
         log.info("shutting down")
         stop_event.set()
 
+    def _reload(*_: Any) -> None:
+        log.info("reload requested")
+        reload_event.set()
+
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _shutdown)
+    loop.add_signal_handler(signal.SIGHUP, _reload)
 
-    await stop_event.wait()
+    metrics_task = asyncio.create_task(
+        _metrics_loop(DEFAULT_METRICS_INTERVAL)
+    )
 
-    for srv in started:
-        await srv.stop()
+    try:
+        while not stop_event.is_set():
+            stop_task = asyncio.create_task(stop_event.wait())
+            reload_task = asyncio.create_task(reload_event.wait())
+            done, pending = await asyncio.wait(
+                {stop_task, reload_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+
+            if stop_event.is_set():
+                break
+
+            if reload_event.is_set():
+                reload_event.clear()
+                log.info("reloading configuration")
+                try:
+                    new_cfg = load_config(cfg_path)
+                except SystemExit as exc:
+                    log.error("reload failed: %s -- keeping old config", exc)
+                    continue
+
+                # Stop old servers.
+                for srv in started:
+                    try:
+                        await srv.stop(grace=2.0)
+                    except Exception as exc:
+                        log.warning("error stopping %s: %s", srv.name, exc)
+
+                # Start new ones.
+                started = []
+                for srv in build_servers(new_cfg):
+                    try:
+                        await srv.start()
+                        started.append(srv)
+                    except OSError as exc:
+                        log.error(
+                            "cannot bind :%d after reload -- %s",
+                            srv.port,
+                            exc,
+                        )
+                    except Exception as exc:
+                        log.error(
+                            "failed to start :%d after reload -- %s",
+                            srv.port,
+                            exc,
+                        )
+                log.info("reload complete: %d services", len(started))
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            pass
+
+        for srv in started:
+            try:
+                await srv.stop()
+            except Exception as exc:
+                log.warning("error stopping %s: %s", srv.name, exc)
 
 
 # ============================================================
@@ -448,7 +635,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     log.info("using config %s", cfg_path)
     try:
-        asyncio.run(run_servers(cfg))
+        asyncio.run(run_servers(cfg, cfg_path))
     except KeyboardInterrupt:
         pass
     return 0
@@ -509,10 +696,22 @@ def cmd_gen_config(args: argparse.Namespace) -> int:
         "max_connections_per_ip",
         DEFAULT_MAX_CONNS,
     )
+    preset["settings"].setdefault(
+        "rate_limit_per_ip",
+        DEFAULT_RATE_LIMIT,
+    )
+    preset["settings"].setdefault(
+        "rate_window_seconds",
+        DEFAULT_RATE_WINDOW,
+    )
     preset["settings"].setdefault("read_timeout", DEFAULT_READ_TIMEOUT)
     preset["settings"].setdefault(
         "handler_read_timeout",
         DEFAULT_HANDLER_TIMEOUT,
+    )
+    preset["settings"].setdefault(
+        "ssh_login_timeout",
+        DEFAULT_SSH_LOGIN_TIMEOUT,
     )
 
     preset.setdefault("tls", {})
