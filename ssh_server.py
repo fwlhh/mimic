@@ -20,6 +20,9 @@ DEFAULT_HOST_KEYS = (
     "/opt/mimic/ssh_host_rsa_key",
 )
 
+# asyncssh prepends "SSH-2.0-" automatically, so do NOT include it here.
+DEFAULT_SERVER_VERSION = "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"
+
 
 class RejectAuthServer(asyncssh.SSHServer):
     """SSH server that completes the handshake but rejects all auth."""
@@ -29,17 +32,17 @@ class RejectAuthServer(asyncssh.SSHServer):
         return True
 
     def password_auth_supported(self) -> bool:
-        return True
-
-    def validate_password(self, username: str, password: str) -> bool:
-        log.info("[ssh] rejected password for %r", username)
         return False
 
     def public_key_auth_supported(self) -> bool:
         return True
 
     def validate_public_key(self, username: str, key) -> bool:
-        log.info("[ssh] rejected public key for %r", username)
+        log.info(
+            "[ssh] rejected public key for %r (algo=%s)",
+            username,
+            getattr(key, "algorithm", "unknown"),
+        )
         return False
 
     def kbdint_auth_supported(self) -> bool:
@@ -49,7 +52,7 @@ class RejectAuthServer(asyncssh.SSHServer):
 async def start_ssh_server(
     port: int,
     host: str = "0.0.0.0",
-    server_version: str = "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
+    server_version: str = DEFAULT_SERVER_VERSION,
     host_keys: tuple[str, ...] = DEFAULT_HOST_KEYS,
 ):
     """Start an asyncssh server that completes the handshake and

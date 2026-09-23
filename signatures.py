@@ -334,11 +334,11 @@ SIGNATURES: dict[str, dict] = {
     # rejects all auth — no shell, no exec, no access.
     "ssh-full-handshake": {
         "ssh_full": True,
-        "ssh_version": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
+        "ssh_version": "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
     },
     "ssh-full-handshake-debian": {
         "ssh_full": True,
-        "ssh_version": "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u2",
+        "ssh_version": "OpenSSH_9.2p1 Debian-2+deb12u2",
     },
     
     # --------------------------------------------------------

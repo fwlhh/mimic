@@ -89,7 +89,7 @@ class SpoofServer:
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         handler_timeout: float = DEFAULT_HANDLER_TIMEOUT,
         ssh_full: bool = False,
-        ssh_version: str = "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
+        ssh_version: str = "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
     ) -> None:
         self.name = name
         self.port = port
@@ -393,7 +393,7 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
                 ssh_full=ssh_full,
                 ssh_version=spec.get(
                     "ssh_version",
-                    "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
+                    "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
                 ),
             )
         )
