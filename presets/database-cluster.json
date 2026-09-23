@@ -1,0 +1,10 @@
+{
+  "services": [
+    { "port": 2379,  "service": "etcd" },
+    { "port": 5432,  "service": "postgres" },
+    { "port": 6379,  "service": "redis" },
+    { "port": 9042,  "service": "cassandra" },
+    { "port": 11211, "service": "memcached" },
+    { "port": 27017, "service": "mongodb" }
+  ]
+}

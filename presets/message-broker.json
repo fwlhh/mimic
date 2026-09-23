@@ -1,0 +1,10 @@
+{
+  "services": [
+    { "port": 5672,  "service": "rabbitmq-amqp" },
+    { "port": 6379,  "service": "redis" },
+    { "port": 9092,  "service": "kafka" },
+    { "port": 11211, "service": "memcached" },
+    { "port": 15672, "service": "rabbitmq-mgmt" },
+    { "port": 4222,  "service": "nats" }
+  ]
+}

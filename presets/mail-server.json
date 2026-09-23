@@ -1,0 +1,11 @@
+{
+  "services": [
+    { "port": 25,  "service": "smtp-postfix" },
+    { "port": 110, "service": "pop3-dovecot" },
+    { "port": 143, "service": "imap-dovecot" },
+    { "port": 443, "service": "nginx-welcome", "tls": true },
+    { "port": 587, "service": "smtp-postfix" },
+    { "port": 993, "service": "imap-dovecot" },
+    { "port": 995, "service": "pop3-dovecot" }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "services": [
+    { "port": 2379,  "service": "etcd" },
+    { "port": 3000,  "service": "grafana" },
+    { "port": 5000,  "service": "docker-registry" },
+    { "port": 6379,  "service": "redis" },
+    { "port": 6443,  "service": "k8s-api" },
+    { "port": 8080,  "service": "ci-runner" },
+    { "port": 9090,  "service": "prometheus" },
+    { "port": 10250, "service": "k8s-kubelet" },
+    { "port": 11211, "service": "memcached" }
+  ]
+}

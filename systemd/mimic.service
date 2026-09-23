@@ -1,0 +1,20 @@
+[Unit]
+Description=Mimic — lightweight port spoofer
+After=network.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+WorkingDirectory=/opt/mimic
+ExecStart=/usr/bin/python3 /opt/mimic/mimic.py run --config /etc/mimic/config.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/mimic
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+{
+  "services": [
+    { "port": 2375,  "service": "docker-daemon" },
+    { "port": 2379,  "service": "etcd" },
+    { "port": 5000,  "service": "docker-registry" },
+    { "port": 6443,  "service": "k8s-api" },
+    { "port": 9000,  "service": "portainer" },
+    { "port": 10250, "service": "k8s-kubelet" }
+  ]
+}

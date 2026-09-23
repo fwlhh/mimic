@@ -1,0 +1,8 @@
+{
+  "services": [
+    { "port": 80,   "service": "iis-default" },
+    { "port": 1433, "service": "unknown" },
+    { "port": 3389, "service": "unknown" },
+    { "port": 5985, "service": "unknown" }
+  ]
+}

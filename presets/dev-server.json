@@ -1,0 +1,10 @@
+{
+  "services": [
+    { "port": 80,    "service": "nginx-welcome" },
+    { "port": 3000,  "service": "grafana" },
+    { "port": 5432,  "service": "postgres" },
+    { "port": 6379,  "service": "redis" },
+    { "port": 8080,  "service": "jenkins" },
+    { "port": 9090,  "service": "prometheus" }
+  ]
+}

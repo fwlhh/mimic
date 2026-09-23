@@ -1,0 +1,8 @@
+{
+  "services": [
+    { "port": 80,   "service": "nginx-welcome" },
+    { "port": 3306, "service": "mysql" },
+    { "port": 6379, "service": "redis" },
+    { "port": 8080, "service": "jenkins" }
+  ]
+}

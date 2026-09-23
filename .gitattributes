@@ -1,0 +1,27 @@
+# Normalize line endings
+* text=auto eol=lf
+
+# Shell scripts must be LF and executable
+*.sh text eol=lf
+
+# Python files
+*.py text eol=lf
+
+# Config files
+*.json text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Docs
+*.md text eol=lf
+LICENSE text eol=lf
+
+# Systemd units
+*.service text eol=lf
+
+# Binary files (if any)
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

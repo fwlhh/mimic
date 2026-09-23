@@ -1,0 +1,9 @@
+{
+  "services": [
+    { "port": 3000, "service": "grafana" },
+    { "port": 5601, "service": "kibana" },
+    { "port": 9090, "service": "prometheus" },
+    { "port": 9093, "service": "alertmanager" },
+    { "port": 9200, "service": "elasticsearch" }
+  ]
+}

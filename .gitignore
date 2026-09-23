@@ -1,0 +1,57 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Local config (may contain secrets)
+config.json
+config.local.json
+*.local.json
+
+# Certs and keys — never commit
+certs/
+*.pem
+*.key
+*.crt
+!config.example.json
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Ruff / mypy
+.ruff_cache/
+.mypy_cache/
+
+# Local env
+.env
+.env.local

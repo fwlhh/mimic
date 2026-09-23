@@ -1,0 +1,23 @@
+{
+  "settings": {
+    "log_level": "INFO",
+    "max_connections_per_ip": 20,
+    "read_timeout": 0.3,
+    "handler_read_timeout": 1.0
+  },
+  "tls": {
+    "cert_file": "/etc/letsencrypt/live/domain/fullchain.pem",
+    "key_file": "/etc/letsencrypt/live/domain/privkey.pem"
+  },
+  "services": [
+    { "port": 2379,  "service": "etcd" },
+    { "port": 3000,  "service": "grafana" },
+    { "port": 5000,  "service": "docker-registry" },
+    { "port": 6379,  "service": "redis" },
+    { "port": 6443,  "service": "k8s-api" },
+    { "port": 8080,  "service": "ci-runner" },
+    { "port": 9090,  "service": "prometheus" },
+    { "port": 10250, "service": "k8s-kubelet" },
+    { "port": 11211, "service": "memcached" }
+  ]
+}
