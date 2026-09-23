@@ -7,7 +7,6 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/mimic}"
 CERT_DIR="${CERT_DIR:-/opt/mimic/certs}"
 LETSENCRYPT_LIVE="${LETSENCRYPT_LIVE:-/etc/letsencrypt/live}"
 BIN_LINK="${BIN_LINK:-/usr/local/bin/mimic}"
-SKIP_LIBOQS="${SKIP_LIBOQS:-0}"
 
 if [[ $EUID -ne 0 ]]; then
     echo "This script must be run as root." >&2
@@ -44,20 +43,11 @@ else
     if ! command -v pip3 >/dev/null 2>&1; then
         apt-get install -y python3-pip
     fi
-    # --ignore-installed: Ubuntu's system cryptography (41.x) was
-    # installed by apt and pip cannot uninstall it. Install a newer
-    # copy into /usr/local/lib, which takes precedence on import.
+    # --ignore-installed: Ubuntu's system cryptography was installed
+    # by apt and pip cannot uninstall it. Install a newer copy into
+    # /usr/local/lib, which takes precedence on import.
     pip3 install --upgrade --break-system-packages --ignore-installed \
         'asyncssh>=2.15'
-fi
-
-# --- liboqs (post-quantum KEX) -----------------------------------------
-if [[ "$SKIP_LIBOQS" == "1" ]]; then
-    echo "==> SKIP_LIBOQS=1, not installing liboqs"
-    echo "    sntrup761x25519-sha512@openssh.com will be unavailable"
-else
-    echo "==> Installing liboqs (post-quantum KEX)"
-    "$SCRIPT_DIR/install-liboqs.sh"
 fi
 
 # --- SSH host keys ------------------------------------------------------

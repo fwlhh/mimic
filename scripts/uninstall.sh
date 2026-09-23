@@ -9,9 +9,7 @@
 #   - certbot deploy hook
 #
 # Optionally removes (prompted):
-#   - pip packages asyncssh, liboqs-python
-#   - liboqs library and headers
-#   - liboqs source tree
+#   - pip package asyncssh
 #
 # Environment overrides:
 #   PREFIX=/opt/mimic
@@ -24,7 +22,6 @@ set -euo pipefail
 PREFIX="${PREFIX:-/opt/mimic}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/mimic}"
 BIN_LINK="${BIN_LINK:-/usr/local/bin/mimic}"
-LIBOQS_SRC="${LIBOQS_SRC:-/usr/local/src/liboqs}"
 CERTBOT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/mimic-copy-certs.sh"
 
 if [[ $EUID -ne 0 ]]; then
@@ -57,20 +54,15 @@ else
 fi
 
 # --- Optional dependencies ---------------------------------------------
-# Determine whether to purge deps.
 if [[ "${PURGE_DEPS:-0}" == "1" ]]; then
     purge_deps=1
 elif [[ "${KEEP_DEPS:-0}" == "1" ]]; then
     purge_deps=0
 else
     echo
-    echo "Mimic installed the following system-wide packages:"
-    echo "  - pip: asyncssh, liboqs-python"
-    echo "  - system: liboqs (in /usr/local/lib, /usr/local/include)"
-    echo "  - source: $LIBOQS_SRC"
-    echo
-    echo "WARNING: other software may depend on these."
-    read -rp "Remove them too? [y/N] " ans
+    echo "Mimic installed asyncssh system-wide via pip."
+    echo "WARNING: other software may depend on it."
+    read -rp "Remove asyncssh too? [y/N] " ans
     if [[ "${ans,,}" == "y" ]]; then
         purge_deps=1
     else
@@ -79,22 +71,9 @@ else
 fi
 
 if [[ "$purge_deps" == "1" ]]; then
-    echo "==> Removing pip packages"
+    echo "==> Removing pip package asyncssh"
     pip3 uninstall -y --break-system-packages asyncssh 2>/dev/null || true
-    pip3 uninstall -y --break-system-packages liboqs-python 2>/dev/null || true
-
-    echo "==> Removing liboqs library and headers"
-    # Files installed by `ninja install` into /usr/local.
-    rm -f /usr/local/lib/liboqs.so*
-    rm -f /usr/local/lib/pkgconfig/liboqs.pc
-    rm -rf /usr/local/include/oqs
-    rm -rf /usr/local/lib/cmake/liboqs
-    ldconfig
-
-    echo "==> Removing liboqs source tree"
-    rm -rf "$LIBOQS_SRC"
-
-    echo "    dependencies removed."
+    echo "    removed."
 else
     echo "    dependencies kept."
 fi

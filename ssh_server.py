@@ -5,10 +5,10 @@ Runs a complete SSH handshake (banner, KEX, host key exchange) so
 scanners like Censys and Shodan see a real SSH server. All auth
 attempts are rejected -- no shell, no exec, no access.
 
-Algorithm lists are pinned to match Ubuntu 24.04's OpenSSH 9.6p1
-defaults. Post-quantum KEX (sntrup761x25519-sha512@openssh.com)
-requires liboqs; it is silently dropped if the local asyncssh
-build does not support it, so the service always starts.
+Algorithm lists are pinned to match a hardened Ubuntu 24.04 server.
+post-quantum KEX (sntrup761x25519-sha512@openssh.com) is intentionally
+omitted: it requires liboqs, which is not worth the operational
+overhead for a single HASSH entry.
 """
 
 from __future__ import annotations
@@ -28,50 +28,20 @@ DEFAULT_HOST_KEYS = (
 # asyncssh prepends "SSH-2.0-" automatically, so do NOT include it here.
 DEFAULT_SERVER_VERSION = "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"
 
-
-def _supported_kex_algs() -> list[str]:
-    """Return the KEX algorithms this asyncssh build actually supports.
-
-    Filters the desired list against what asyncssh reports. This lets
-    us advertise sntrup761x25519-sha512@openssh.com when liboqs is
-    available, and silently skip it otherwise.
-    """
-    desired = [
-        "sntrup761x25519-sha512@openssh.com",
-        "curve25519-sha256",
-        "curve25519-sha256@libssh.org",
-        "ecdh-sha2-nistp256",
-        "ecdh-sha2-nistp384",
-        "ecdh-sha2-nistp521",
-        "diffie-hellman-group-exchange-sha256",
-        "diffie-hellman-group16-sha512",
-        "diffie-hellman-group18-sha512",
-        "diffie-hellman-group14-sha256",
-    ]
-
-    try:
-        from asyncssh.kex import get_kex_algs
-        available = set(get_kex_algs())
-    except Exception:
-        # Very old asyncssh -- fall back to whatever it accepts.
-        return desired
-
-    filtered = [alg for alg in desired if alg in available]
-    missing = [alg for alg in desired if alg not in available]
-    if missing:
-        log.info(
-            "[ssh] KEX algorithms not supported by local asyncssh: %s",
-            ", ".join(missing),
-        )
-    return filtered
-
-
-# signature_algs controls host key and public key signature algorithms.
-SIGNATURE_ALGS = [
-    "ssh-ed25519",
-    "rsa-sha2-512",
-    "rsa-sha2-256",
-    "ecdsa-sha2-nistp256",
+# KEX algorithms matching a hardened Ubuntu 24.04 OpenSSH 9.6p1.
+# sntrup761x25519-sha512@openssh.com is omitted -- it would require
+# liboqs, and its absence does not meaningfully change the HASSH
+# fingerprint from a real server with a trimmed KEX list.
+KEX_ALGS = [
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+    "diffie-hellman-group-exchange-sha256",
+    "diffie-hellman-group16-sha512",
+    "diffie-hellman-group18-sha512",
+    "diffie-hellman-group14-sha256",
 ]
 
 ENCRYPTION_ALGS = [
@@ -94,6 +64,13 @@ MAC_ALGS = [
     "hmac-sha2-256",
     "hmac-sha2-512",
     "hmac-sha1",
+]
+
+SIGNATURE_ALGS = [
+    "ssh-ed25519",
+    "rsa-sha2-512",
+    "rsa-sha2-256",
+    "ecdsa-sha2-nistp256",
 ]
 
 
@@ -140,10 +117,7 @@ async def start_ssh_server(
             "-f /opt/mimic/ssh_host_rsa_key -N ''"
         )
 
-    kex = _supported_kex_algs()
     log.info("[ssh] starting full-handshake server on :%d", port)
-    log.debug("[ssh] KEX algorithms: %s", ", ".join(kex))
-
     return await asyncssh.create_server(
         RejectAuthServer,
         host=host,
@@ -151,7 +125,7 @@ async def start_ssh_server(
         server_host_keys=list(existing),
         server_version=server_version,
         encoding=None,
-        kex_algs=kex,
+        kex_algs=KEX_ALGS,
         encryption_algs=ENCRYPTION_ALGS,
         mac_algs=MAC_ALGS,
         signature_algs=SIGNATURE_ALGS,
