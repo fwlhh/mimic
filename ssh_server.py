@@ -6,9 +6,6 @@ scanners like Censys and Shodan see a real SSH server. All auth
 attempts are rejected -- no shell, no exec, no access.
 
 Algorithm lists are pinned to match a hardened Ubuntu 24.04 server.
-post-quantum KEX (sntrup761x25519-sha512@openssh.com) is intentionally
-omitted: it requires liboqs, which is not worth the operational
-overhead for a single HASSH entry.
 """
 
 from __future__ import annotations
@@ -66,7 +63,19 @@ MAC_ALGS = [
     "hmac-sha1",
 ]
 
+# Algorithms used for host key signatures and public key auth.
 SIGNATURE_ALGS = [
+    "ssh-ed25519",
+    "rsa-sha2-512",
+    "rsa-sha2-256",
+    "ecdsa-sha2-nistp256",
+]
+
+# Host key algorithms advertised to clients.
+# Pinning this list prevents asyncssh from automatically appending
+# SHA-1 based ssh-rsa and vendor @ssh.com extensions, which a real
+# hardened server would not advertise.
+HOST_KEY_ALGS = [
     "ssh-ed25519",
     "rsa-sha2-512",
     "rsa-sha2-256",
@@ -118,8 +127,8 @@ async def start_ssh_server(
         )
 
     log.info("[ssh] starting full-handshake server on :%d", port)
-    return await asyncssh.create_server(
-        RejectAuthServer,
+
+    kwargs = dict(
         host=host,
         port=port,
         server_host_keys=list(existing),
@@ -130,3 +139,21 @@ async def start_ssh_server(
         mac_algs=MAC_ALGS,
         signature_algs=SIGNATURE_ALGS,
     )
+
+    # server_host_key_algs may not exist in older asyncssh builds.
+    # Try with it, fall back without it.
+    try:
+        return await asyncssh.create_server(
+            RejectAuthServer,
+            server_host_key_algs=HOST_KEY_ALGS,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "server_host_key_algs" not in str(exc):
+            raise
+        log.warning(
+            "[ssh] server_host_key_algs not supported by this asyncssh "
+            "build; ssh-rsa and @ssh.com host key algorithms may be "
+            "advertised."
+        )
+        return await asyncssh.create_server(RejectAuthServer, **kwargs)
