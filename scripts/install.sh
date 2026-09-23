@@ -7,6 +7,7 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/mimic}"
 CERT_DIR="${CERT_DIR:-/opt/mimic/certs}"
 LETSENCRYPT_LIVE="${LETSENCRYPT_LIVE:-/etc/letsencrypt/live}"
 BIN_LINK="${BIN_LINK:-/usr/local/bin/mimic}"
+SKIP_LIBOQS="${SKIP_LIBOQS:-0}"
 
 if [[ $EUID -ne 0 ]]; then
     echo "This script must be run as root." >&2
@@ -33,11 +34,6 @@ echo "==> Installing CLI wrapper at $BIN_LINK"
 ln -sf "$PREFIX/mimic.py" "$BIN_LINK"
 
 # --- asyncssh -----------------------------------------------------------
-# Full SSH handshake needs asyncssh >= 2.15 for post-quantum KEX
-# (sntrup761x25519-sha512@openssh.com). Ubuntu 24.04 ships 2.14.2,
-# which lacks it, so we upgrade via pip if the installed version is
-# too old. The system Python finds the pip-installed copy in
-# /usr/local/lib/python*/dist-packages/ automatically.
 echo "==> Checking asyncssh version (need >= 2.15)"
 if python3 -c "import asyncssh, sys; \
                sys.exit(0 if tuple(map(int, asyncssh.__version__.split('.')[:2])) >= (2, 15) else 1)" \
@@ -53,6 +49,15 @@ else
     # copy into /usr/local/lib, which takes precedence on import.
     pip3 install --upgrade --break-system-packages --ignore-installed \
         'asyncssh>=2.15'
+fi
+
+# --- liboqs (post-quantum KEX) -----------------------------------------
+if [[ "$SKIP_LIBOQS" == "1" ]]; then
+    echo "==> SKIP_LIBOQS=1, not installing liboqs"
+    echo "    sntrup761x25519-sha512@openssh.com will be unavailable"
+else
+    echo "==> Installing liboqs (post-quantum KEX)"
+    "$SCRIPT_DIR/install-liboqs.sh"
 fi
 
 # --- SSH host keys ------------------------------------------------------
