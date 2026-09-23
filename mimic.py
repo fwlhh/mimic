@@ -482,11 +482,11 @@ def cmd_gen_config(args: argparse.Namespace) -> int:
     preset.setdefault("tls", {})
     preset["tls"].setdefault(
         "cert_file",
-        "/etc/letsencrypt/live/example.com/fullchain.pem",
+        "/opt/mimic/certs/example.com/fullchain.pem",
     )
     preset["tls"].setdefault(
         "key_file",
-        "/etc/letsencrypt/live/example.com/privkey.pem",
+        "/opt/mimic/certs/example.com/privkey.pem",
     )
 
     out.write_text(
@@ -506,13 +506,22 @@ def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mimic",
         description="Lightweight port spoofer for disguising servers.",
+        epilog=(
+            "examples:\n"
+            "  mimic run --config /etc/mimic/config.json\n"
+            "  mimic list-presets\n"
+            "  mimic list-signatures\n"
+            "  mimic show-signature nginx-welcome\n"
+            "  mimic gen-config --preset ci-cd -o config.json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = parser.add_subparsers(dest="cmd", required=False)
 
     p_run = sub.add_parser(
         "run",
@@ -560,6 +569,11 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point."""
     parser = build_argparser()
     args = parser.parse_args(argv)
+
+    if not getattr(args, "cmd", None):
+        parser.print_help()
+        return 0
+
     return args.func(args)
 
 
