@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import json
 import logging
+import random
 import signal
 import ssl
 import sys
@@ -24,7 +25,9 @@ from typing import Any
 
 from signatures import (
     HANDLERS,
+    KNOWN_PORTS,
     SIGNATURES,
+    TLS_ONLY_PORTS,
     Handler,
     build_http_response,
     build_raw_response,
@@ -61,20 +64,24 @@ PRESETS_DIR = BASE_DIR / "presets"
 DEFAULT_MAX_CONNS = 20
 DEFAULT_READ_TIMEOUT = 0.3
 DEFAULT_HANDLER_TIMEOUT = 1.0
-DEFAULT_RATE_LIMIT = 30           # new connections per IP per window
-DEFAULT_RATE_WINDOW = 60.0        # seconds
-DEFAULT_GLOBAL_CONNECTIONS = 200  # hard cap across all ports
-DEFAULT_SHUTDOWN_GRACE = 5.0      # seconds to wait for active conns
-DEFAULT_METRICS_INTERVAL = 60.0   # seconds between metric dumps
-DEFAULT_SSH_LOGIN_TIMEOUT = 30.0  # seconds for SSH handshake + auth
+DEFAULT_RATE_LIMIT = 120            # new connections per IP per window
+DEFAULT_RATE_WINDOW = 60.0         # seconds
+DEFAULT_SHUTDOWN_GRACE = 5.0       # seconds to wait for active conns
+DEFAULT_METRICS_INTERVAL = 60.0    # seconds between metric dumps
+DEFAULT_SSH_LOGIN_TIMEOUT = 30.0   # seconds for SSH handshake + auth
+DEFAULT_JITTER_MIN = 0.001         # 1 ms
+DEFAULT_JITTER_MAX = 0.030         # 30 ms
+
+# Rate-limit state is pruned every N seconds.
+RATE_PRUNE_INTERVAL = 120.0
 
 
 # ============================================================
-# Global metrics
+# Metrics
 # ============================================================
 
 class Metrics:
-    """Simple in-memory counters, dumped to the log periodically."""
+    """In-memory counters, dumped to the log periodically."""
 
     def __init__(self) -> None:
         self.started_at = time.monotonic()
@@ -101,6 +108,9 @@ class Metrics:
 
 
 metrics = Metrics()
+
+# Track running servers so the metrics loop can prune their state.
+_active_servers: list["SpoofServer"] = []
 
 
 # ============================================================
@@ -135,6 +145,8 @@ class SpoofServer:
         ssh_full: bool = False,
         ssh_version: str = "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
         ssh_login_timeout: float = DEFAULT_SSH_LOGIN_TIMEOUT,
+        jitter_min: float = DEFAULT_JITTER_MIN,
+        jitter_max: float = DEFAULT_JITTER_MAX,
     ) -> None:
         self.name = name
         self.port = port
@@ -153,12 +165,31 @@ class SpoofServer:
         self.ssh_full = ssh_full
         self.ssh_version = ssh_version
         self.ssh_login_timeout = ssh_login_timeout
+        self.jitter_min = jitter_min
+        self.jitter_max = jitter_max
         self.server: asyncio.AbstractServer | None = None
         self.ssl_context: ssl.SSLContext | None = None
         self.ssh_acceptor: Any = None
         self._connections: dict[str, int] = {}
         self._recent: dict[str, list[float]] = {}
-        self._shutdown = asyncio.Event()
+
+    # ---------- Helpers ----------
+
+    def _jitter(self) -> float:
+        """Return a random jitter in [jitter_min, jitter_max]."""
+        if self.jitter_max <= self.jitter_min:
+            return 0.0
+        return random.uniform(self.jitter_min, self.jitter_max)
+
+    def prune_rate_state(self, max_age: float = RATE_PRUNE_INTERVAL) -> None:
+        """Drop rate-limit entries older than max_age seconds."""
+        cutoff = time.monotonic() - max_age
+        stale = [
+            ip for ip, times in self._recent.items()
+            if not times or times[-1] < cutoff
+        ]
+        for ip in stale:
+            del self._recent[ip]
 
     # ---------- TLS ----------
 
@@ -189,7 +220,6 @@ class SpoofServer:
         now = time.monotonic()
         cutoff = now - self.rate_window
         recent = self._recent.get(peer_ip, [])
-        # Drop entries older than the window.
         recent = [t for t in recent if t > cutoff]
         if len(recent) >= self.rate_limit:
             self._recent[peer_ip] = recent
@@ -283,6 +313,7 @@ class SpoofServer:
             data = b""
         response = self.handler(data)
         if response:
+            await asyncio.sleep(self._jitter())
             writer.write(response)
             await writer.drain()
 
@@ -300,6 +331,7 @@ class SpoofServer:
             pass
         if self.delay:
             await asyncio.sleep(self.delay)
+        await asyncio.sleep(self._jitter())
         writer.write(self.response)
         await writer.drain()
 
@@ -314,9 +346,9 @@ class SpoofServer:
     # ---------- SSH full-handshake mode ----------
 
     async def _start_ssh(self) -> None:
-        try:
-            from ssh_server import start_ssh_server
-        except ImportError:
+        from signatures import SSH_AVAILABLE, start_ssh_server
+
+        if not SSH_AVAILABLE:
             log.error(
                 "[%s] ssh_full requires the 'asyncssh' package. "
                 "Install with: sudo apt install python3-asyncssh",
@@ -371,9 +403,12 @@ class SpoofServer:
             self.server.close()
             await self.server.wait_closed()
 
-        # Wait for active connections to finish, up to `grace` seconds.
+        # Wait for this server's active connections to finish.
         deadline = time.monotonic() + grace
-        while metrics.active_connections > 0 and time.monotonic() < deadline:
+        while (
+            self._connections
+            and time.monotonic() < deadline
+        ):
             await asyncio.sleep(0.1)
 
 
@@ -438,6 +473,38 @@ def _build_response(spec: dict[str, Any]) -> bytes:
     )
 
 
+def _validate_port_protocol(port: int, service_name: str) -> None:
+    """Warn if a service is bound to a port it does not belong to."""
+    expected = KNOWN_PORTS.get(port)
+    if expected is None:
+        return
+
+    tokens = service_name.lower().split("-")
+    if any(expected.startswith(t) or t.startswith(expected) for t in tokens):
+        return
+
+    families = {
+        "http": {"nginx", "apache", "iis", "caddy", "tomcat",
+                 "http-alt", "http-proxy"},
+        "https": {"nginx", "apache", "iis", "caddy", "tomcat"},
+        "smtp": {"smtp", "smtps", "smtp-submission"},
+        "smtps": {"smtp", "smtps"},
+        "imap": {"imap", "imaps"},
+        "imaps": {"imap", "imaps"},
+        "pop3": {"pop3", "pop3s"},
+        "pop3s": {"pop3", "pop3s"},
+    }
+    allowed = families.get(expected, set())
+    if any(t in allowed for t in tokens):
+        return
+
+    log.warning(
+        "port %d is conventionally used by %r, but service %r "
+        "is bound there. Scanners may flag this as anomalous.",
+        port, expected, service_name,
+    )
+
+
 def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
     settings = cfg.get("settings", {})
     tls_cfg = cfg.get("tls", {})
@@ -467,12 +534,21 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
     ssh_login_timeout = float(
         settings.get("ssh_login_timeout", DEFAULT_SSH_LOGIN_TIMEOUT)
     )
+    jitter_min = float(
+        settings.get("jitter_min", DEFAULT_JITTER_MIN)
+    )
+    jitter_max = float(
+        settings.get("jitter_max", DEFAULT_JITTER_MAX)
+    )
 
     servers: list[SpoofServer] = []
     for raw in cfg.get("services", []):
         spec = merge_service_spec(raw)
         port = int(spec["port"])
         name = spec.get("name", f"port-{port}")
+
+        _validate_port_protocol(port, name)
+
         handler = _resolve_handler(spec, name)
         ssh_full = bool(spec.get("ssh_full", False))
 
@@ -481,12 +557,22 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
         else:
             response_bytes = _build_response(spec)
 
+        # Auto-enable TLS on ports where it is required by convention.
+        requested_tls = bool(spec.get("tls", False))
+        if port in TLS_ONLY_PORTS and not requested_tls:
+            log.warning(
+                "port %d requires TLS by convention; "
+                "enabling TLS for %r",
+                port, name,
+            )
+            requested_tls = True
+
         servers.append(
             SpoofServer(
                 name=name,
                 port=port,
                 response_bytes=response_bytes,
-                tls=bool(spec.get("tls", False)),
+                tls=requested_tls,
                 delay=float(spec.get("delay", 0.0)),
                 keep_open=bool(spec.get("keep_open", False)),
                 handler=handler,
@@ -503,6 +589,8 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
                     "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
                 ),
                 ssh_login_timeout=ssh_login_timeout,
+                jitter_min=jitter_min,
+                jitter_max=jitter_max,
             )
         )
     return servers
@@ -513,10 +601,19 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
 # ============================================================
 
 async def _metrics_loop(interval: float) -> None:
-    """Log a metrics snapshot every `interval` seconds."""
+    """Log a metrics snapshot every `interval` seconds and prune
+    stale rate-limit state from every server."""
     while True:
         await asyncio.sleep(interval)
         log.info("[metrics] %s", metrics.snapshot())
+        for srv in _active_servers:
+            try:
+                srv.prune_rate_state()
+            except Exception as exc:
+                log.debug(
+                    "[%s:%d] prune failed: %s",
+                    srv.name, srv.port, exc,
+                )
 
 
 async def run_servers(cfg: dict[str, Any], cfg_path: Path) -> None:
@@ -536,6 +633,9 @@ async def run_servers(cfg: dict[str, Any], cfg_path: Path) -> None:
 
     if not started:
         raise SystemExit("No services started")
+
+    _active_servers.clear()
+    _active_servers.extend(started)
 
     stop_event = asyncio.Event()
     reload_event = asyncio.Event()
@@ -585,7 +685,9 @@ async def run_servers(cfg: dict[str, Any], cfg_path: Path) -> None:
                     try:
                         await srv.stop(grace=2.0)
                     except Exception as exc:
-                        log.warning("error stopping %s: %s", srv.name, exc)
+                        log.warning(
+                            "error stopping %s: %s", srv.name, exc,
+                        )
 
                 # Start new ones.
                 started = []
@@ -596,15 +698,16 @@ async def run_servers(cfg: dict[str, Any], cfg_path: Path) -> None:
                     except OSError as exc:
                         log.error(
                             "cannot bind :%d after reload -- %s",
-                            srv.port,
-                            exc,
+                            srv.port, exc,
                         )
                     except Exception as exc:
                         log.error(
                             "failed to start :%d after reload -- %s",
-                            srv.port,
-                            exc,
+                            srv.port, exc,
                         )
+
+                _active_servers.clear()
+                _active_servers.extend(started)
                 log.info("reload complete: %d services", len(started))
     finally:
         metrics_task.cancel()
@@ -618,6 +721,8 @@ async def run_servers(cfg: dict[str, Any], cfg_path: Path) -> None:
                 await srv.stop()
             except Exception as exc:
                 log.warning("error stopping %s: %s", srv.name, exc)
+
+        _active_servers.clear()
 
 
 # ============================================================
@@ -693,26 +798,23 @@ def cmd_gen_config(args: argparse.Namespace) -> int:
     preset.setdefault("settings", {})
     preset["settings"].setdefault("log_level", "INFO")
     preset["settings"].setdefault(
-        "max_connections_per_ip",
-        DEFAULT_MAX_CONNS,
+        "max_connections_per_ip", DEFAULT_MAX_CONNS,
     )
     preset["settings"].setdefault(
-        "rate_limit_per_ip",
-        DEFAULT_RATE_LIMIT,
+        "rate_limit_per_ip", DEFAULT_RATE_LIMIT,
     )
     preset["settings"].setdefault(
-        "rate_window_seconds",
-        DEFAULT_RATE_WINDOW,
+        "rate_window_seconds", DEFAULT_RATE_WINDOW,
     )
     preset["settings"].setdefault("read_timeout", DEFAULT_READ_TIMEOUT)
     preset["settings"].setdefault(
-        "handler_read_timeout",
-        DEFAULT_HANDLER_TIMEOUT,
+        "handler_read_timeout", DEFAULT_HANDLER_TIMEOUT,
     )
     preset["settings"].setdefault(
-        "ssh_login_timeout",
-        DEFAULT_SSH_LOGIN_TIMEOUT,
+        "ssh_login_timeout", DEFAULT_SSH_LOGIN_TIMEOUT,
     )
+    preset["settings"].setdefault("jitter_min", DEFAULT_JITTER_MIN)
+    preset["settings"].setdefault("jitter_max", DEFAULT_JITTER_MAX)
 
     preset.setdefault("tls", {})
     preset["tls"].setdefault(

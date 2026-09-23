@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Full SSH server for Mimic.
+"""Full SSH handshake server for Mimic.
 
 Runs a complete SSH handshake (banner, KEX, host key exchange) so
 scanners like Censys and Shodan see a real SSH server. All auth
 attempts are rejected -- no shell, no exec, no access.
 
-Algorithm lists are pinned to match a hardened Ubuntu 24.04 server.
+Requires asyncssh >= 2.15. The import is deferred to the top of
+this module; callers should guard `from signatures.ssh import ...`
+with try/except ImportError if asyncssh may be missing.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ DEFAULT_HOST_KEYS = (
 
 # asyncssh prepends "SSH-2.0-" automatically, so do NOT include it here.
 DEFAULT_SERVER_VERSION = "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"
+
+DEFAULT_LOGIN_TIMEOUT = 30.0
 
 # KEX algorithms matching a hardened Ubuntu 24.04 OpenSSH 9.6p1.
 # sntrup761x25519-sha512@openssh.com is omitted -- it would require
@@ -63,19 +67,7 @@ MAC_ALGS = [
     "hmac-sha1",
 ]
 
-# Algorithms used for host key signatures and public key auth.
 SIGNATURE_ALGS = [
-    "ssh-ed25519",
-    "rsa-sha2-512",
-    "rsa-sha2-256",
-    "ecdsa-sha2-nistp256",
-]
-
-# Host key algorithms advertised to clients.
-# Pinning this list prevents asyncssh from automatically appending
-# SHA-1 based ssh-rsa and vendor @ssh.com extensions, which a real
-# hardened server would not advertise.
-HOST_KEY_ALGS = [
     "ssh-ed25519",
     "rsa-sha2-512",
     "rsa-sha2-256",
@@ -85,6 +77,13 @@ HOST_KEY_ALGS = [
 
 class RejectAuthServer(asyncssh.SSHServer):
     """SSH server that completes the handshake but rejects all auth."""
+
+    def connection_made(self, conn) -> None:
+        peer = conn.get_extra_info("peername")
+        if peer:
+            log.info(
+                "[ssh] connection from %s:%d", peer[0], peer[1],
+            )
 
     def begin_auth(self, username: str) -> bool:
         log.info("[ssh] auth attempt for user %r", username)
@@ -113,6 +112,7 @@ async def start_ssh_server(
     host: str = "0.0.0.0",
     server_version: str = DEFAULT_SERVER_VERSION,
     host_keys: tuple[str, ...] = DEFAULT_HOST_KEYS,
+    login_timeout: float = DEFAULT_LOGIN_TIMEOUT,
 ):
     """Start an asyncssh server that completes the handshake and
     rejects every authentication attempt."""
@@ -140,20 +140,17 @@ async def start_ssh_server(
         signature_algs=SIGNATURE_ALGS,
     )
 
-    # server_host_key_algs may not exist in older asyncssh builds.
-    # Try with it, fall back without it.
+    # login_timeout exists in asyncssh >= 2.9. Older builds raise
+    # TypeError; fall back without it.
     try:
         return await asyncssh.create_server(
-            RejectAuthServer,
-            server_host_key_algs=HOST_KEY_ALGS,
-            **kwargs,
+            RejectAuthServer, login_timeout=login_timeout, **kwargs,
         )
     except TypeError as exc:
-        if "server_host_key_algs" not in str(exc):
+        if "login_timeout" not in str(exc):
             raise
         log.warning(
-            "[ssh] server_host_key_algs not supported by this asyncssh "
-            "build; ssh-rsa and @ssh.com host key algorithms may be "
-            "advertised."
+            "[ssh] login_timeout not supported by this asyncssh build; "
+            "using default"
         )
         return await asyncssh.create_server(RejectAuthServer, **kwargs)

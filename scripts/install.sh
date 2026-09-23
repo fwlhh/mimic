@@ -22,9 +22,16 @@ install -d "$PREFIX/presets"
 install -d "$CERT_DIR"
 
 install -m 0755 "$SRC_DIR/mimic.py"      "$PREFIX/mimic.py"
-install -m 0644 "$SRC_DIR/signatures.py" "$PREFIX/signatures.py"
-install -m 0644 "$SRC_DIR/ssh_server.py" "$PREFIX/ssh_server.py"
 
+# --- signatures/ package -----------------------------------------------
+echo "==> Installing signatures/ package"
+rm -rf "$PREFIX/signatures"
+install -d "$PREFIX/signatures"
+for f in "$SRC_DIR"/signatures/*.py; do
+    install -m 0644 "$f" "$PREFIX/signatures/"
+done
+
+# --- presets -----------------------------------------------------------
 if compgen -G "$SRC_DIR/presets/*.json" > /dev/null; then
     install -m 0644 "$SRC_DIR"/presets/*.json "$PREFIX/presets/"
 fi
@@ -43,9 +50,6 @@ else
     if ! command -v pip3 >/dev/null 2>&1; then
         apt-get install -y python3-pip
     fi
-    # --ignore-installed: Ubuntu's system cryptography was installed
-    # by apt and pip cannot uninstall it. Install a newer copy into
-    # /usr/local/lib, which takes precedence on import.
     pip3 install --upgrade --break-system-packages --ignore-installed \
         'asyncssh>=2.15'
 fi

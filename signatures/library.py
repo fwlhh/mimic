@@ -1,355 +1,59 @@
 #!/usr/bin/env python3
-"""Built-in service signatures and protocol handlers for Mimic.
-
-A signature describes how a port should respond:
-
-HTTP service:
-    status   -- HTTP status line, e.g. "200 OK"
-    headers  -- dict of HTTP headers
-    body     -- response body (str)
-
-Raw service:
-    raw      -- True
-    body     -- banner sent as-is
-
-Handler service:
-    handler  -- name of a protocol handler from HANDLERS
-
-Any signature may also set:
-    tls        -- wrap in TLS (requires cert/key in config)
-    delay      -- seconds before responding (float)
-    keep_open  -- keep connection open after response (bool)
-"""
+"""Signature library: service definitions and port mappings."""
 
 from __future__ import annotations
 
-import struct
-from typing import Callable
 
-Handler = Callable[[bytes], bytes]
-
-
-# ============================================================
-# HTTP helpers
-# ============================================================
-
-def build_http_response(
-    status: str,
-    headers: dict[str, str],
-    body: str,
-) -> bytes:
-    """Build a valid HTTP/1.1 response with auto Content-Length."""
-    body_bytes = body.encode("utf-8")
-    lines = [f"HTTP/1.1 {status}"]
-    for key, value in headers.items():
-        lines.append(f"{key}: {value}")
-    if not any(h.lower() == "content-length" for h in headers):
-        lines.append(f"Content-Length: {len(body_bytes)}")
-    if not any(h.lower() == "connection" for h in headers):
-        lines.append("Connection: close")
-    head = "\r\n".join(lines) + "\r\n\r\n"
-    return head.encode("utf-8") + body_bytes
-
-
-def build_raw_response(body: str | bytes) -> bytes:
-    """Return the body as-is, encoding to UTF-8 if needed."""
-    if isinstance(body, bytes):
-        return body
-    return body.encode("utf-8")
-
-
-_HTTP_METHODS = (
-    b"GET ",
-    b"POST ",
-    b"HEAD ",
-    b"OPTIONS ",
-    b"PUT ",
-    b"DELETE ",
-    b"TRACE ",
-    b"PATCH ",
-)
-
-
-def _is_http(data: bytes) -> bool:
-    """Return True if data looks like an HTTP request."""
-    if not data:
-        return False
-    upper = data[:16].upper()
-    return any(upper.startswith(method) for method in _HTTP_METHODS)
-
-
-def _is_proxy_like(data: bytes) -> bool:
-    """Return True if data looks like an open-proxy probe."""
-    if data[:8].upper().startswith(b"CONNECT "):
-        return True
-    first_line = data.split(b"\r\n", 1)[0]
-    parts = first_line.split(b" ", 2)
-    return len(parts) >= 2 and b"://" in parts[1]
-
-
-def _http_400() -> bytes:
-    """Minimal 400 Bad Request response with empty body."""
-    return (
-        b"HTTP/1.1 400 Bad Request\r\n"
-        b"Content-Length: 0\r\n"
-        b"Connection: close\r\n"
-        b"\r\n"
-    )
-
-
-# ============================================================
-# Protocol handlers
-# ============================================================
-
-def handle_redis(data: bytes) -> bytes:
-    """Minimal Redis emulation (auth-required behaviour)."""
-    cmd = data.strip().lower()
-    if cmd.startswith(b"auth"):
-        return b"-ERR invalid password\r\n"
-    if cmd.startswith(b"quit"):
-        return b""
-    return b"-NOAUTH Authentication required.\r\n"
-
-
-def handle_memcached(data: bytes) -> bytes:
-    """Minimal Memcached emulation (version, stats, get/set)."""
-    cmd = data.strip().lower()
-
-    if cmd.startswith(b"version"):
-        return b"VERSION 1.6.21\r\n"
-
-    if cmd.startswith(b"stats"):
-        return (
-            b"STAT pid 1\r\n"
-            b"STAT uptime 847293\r\n"
-            b"STAT time 1700000000\r\n"
-            b"STAT version 1.6.21\r\n"
-            b"STAT libevent 2.1.12-stable\r\n"
-            b"STAT pointer_size 64\r\n"
-            b"STAT max_connections 1024\r\n"
-            b"STAT curr_connections 5\r\n"
-            b"STAT total_connections 1234\r\n"
-            b"STAT cmd_get 100\r\n"
-            b"STAT cmd_set 50\r\n"
-            b"STAT bytes_read 5000\r\n"
-            b"STAT bytes_written 10000\r\n"
-            b"STAT limit_maxbytes 67108864\r\n"
-            b"STAT threads 4\r\n"
-            b"END\r\n"
-        )
-
-    if cmd.startswith(b"get ") or cmd.startswith(b"gets "):
-        return b"END\r\n"
-    if cmd.startswith(b"set ") or cmd.startswith(b"add "):
-        return b"STORED\r\n"
-    if cmd.startswith(b"replace "):
-        return b"NOT_STORED\r\n"
-    if (
-        cmd.startswith(b"delete ")
-        or cmd.startswith(b"incr ")
-        or cmd.startswith(b"decr ")
-    ):
-        return b"NOT_FOUND\r\n"
-    if cmd.startswith(b"quit"):
-        return b""
-    if cmd.startswith(b"flush_all") or cmd.startswith(b"verbosity"):
-        return b"OK\r\n"
-    return b"ERROR\r\n"
-
-
-def handle_etcd(data: bytes) -> bytes:
-    """etcd /version on HTTP; 400 otherwise or on proxy-like probes."""
-    if not _is_http(data) or _is_proxy_like(data):
-        return _http_400()
-    return build_http_response(
-        "200 OK",
-        {"Content-Type": "application/json"},
-        (
-            '{"etcdserver":"3.5.10","etcdcluster":"3.5.0",'
-            '"etcdserver_version":"3.5.10"}'
-        ),
-    )
-
-
-def handle_ci_runner(data: bytes) -> bytes:
-    """Generic CI runner JSON API."""
-    if not _is_http(data) or _is_proxy_like(data):
-        return _http_400()
-    return build_http_response(
-        "200 OK",
-        {"Content-Type": "application/json"},
-        '{"status":"ok","service":"ci-runner","version":"1.2.4"}',
-    )
-
-
-def handle_mysql(_data: bytes) -> bytes:
-    """Send a valid MySQL 8.0.x server greeting packet."""
-    # Protocol version 10 (0x0a), server version, thread id,
-    # auth-plugin-data part 1 (8 bytes), filler, capabilities,
-    # charset, status, caps upper, auth len, reserved,
-    # auth-plugin-data part 2 (12 + NUL), plugin name.
-    payload = (
-        b"\x0a"
-        + b"8.0.35\x00"
-        + struct.pack("<I", 42)
-        + b"abcdefgh"
-        + b"\x00"
-        + struct.pack("<H", 0xFFFF)
-        + b"\x21"
-        + struct.pack("<H", 0x0002)
-        + struct.pack("<H", 0xFFFF)
-        + b"\x15"
-        + b"\x00" * 10
-        + b"ijklmnopqrst\x00"
-        + b"mysql_native_password\x00"
-    )
-    header = struct.pack("<I", len(payload))[:3] + b"\x00"
-    return header + payload
-
-
-def handle_postgres(data: bytes) -> bytes:
-    """PostgreSQL: reply with cleartext-password auth request.
-
-    Real PostgreSQL sends nothing until the client sends a
-    StartupMessage; we only respond once the client has spoken.
-    """
-    if not data:
-        return b""
-    # 'R' message, length 8, auth code 3 (cleartext password).
-    return b"R\x00\x00\x00\x08\x00\x00\x00\x03"
-
-
-def handle_mqtt(data: bytes) -> bytes:
-    """MQTT 3.1.1 CONNACK with return code 0 (accepted)."""
-    if not data:
-        return b""
-    return b"\x20\x02\x00\x00"
-
-
-def handle_amqp(_data: bytes) -> bytes:
-    """AMQP 0-9-1 protocol header."""
-    return b"AMQP\x00\x00\x09\x01"
-
-
-def handle_smtp(data: bytes) -> bytes:
-    """Minimal SMTP: greeting on empty input, per-command otherwise."""
-    if not data:
-        return b"220 mail.example.com ESMTP Postfix (Ubuntu)\r\n"
-
-    cmd = data.strip().upper()
-    if cmd.startswith(b"EHLO"):
-        return (
-            b"250-mail.example.com\r\n"
-            b"250-PIPELINING\r\n"
-            b"250-SIZE 10240000\r\n"
-            b"250-VRFY\r\n"
-            b"250-ETRN\r\n"
-            b"250-STARTTLS\r\n"
-            b"250-ENHANCEDSTATUSCODES\r\n"
-            b"250-8BITMIME\r\n"
-            b"250-DSN\r\n"
-            b"250 SMTPUTF8\r\n"
-        )
-    if cmd.startswith(b"HELO"):
-        return b"250 mail.example.com\r\n"
-    if cmd.startswith(b"MAIL FROM"):
-        return b"250 2.1.0 Ok\r\n"
-    if cmd.startswith(b"RCPT TO"):
-        return b"250 2.1.5 Ok\r\n"
-    if cmd.startswith(b"DATA"):
-        return b"354 End data with <CR><LF>.<CR><LF>\r\n"
-    if cmd.startswith(b"QUIT"):
-        return b"221 2.0.0 Bye\r\n"
-    if cmd.startswith(b"NOOP"):
-        return b"250 2.0.0 Ok\r\n"
-    return b"502 5.5.2 Error: command not recognized\r\n"
-
-
-def handle_pop3(data: bytes) -> bytes:
-    """Minimal POP3: greeting on empty input, per-command otherwise."""
-    if not data:
-        return b"+OK Dovecot ready.\r\n"
-
-    cmd = data.strip().upper()
-    if cmd.startswith(b"USER"):
-        return b"+OK\r\n"
-    if cmd.startswith(b"PASS"):
-        return b"-ERR [AUTH] Authentication failed.\r\n"
-    if cmd.startswith(b"CAPA"):
-        return b"+OK\r\nUSER\r\nUIDL\r\nTOP\r\n.\r\n"
-    if cmd.startswith(b"QUIT"):
-        return b"+OK Logging out.\r\n"
-    return b"-ERR Unknown command.\r\n"
-
-
-def handle_imap(data: bytes) -> bytes:
-    """Minimal IMAP: greeting on empty input, per-command otherwise."""
-    if not data:
-        return (
-            b"* OK [CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS "
-            b"ID ENABLE IDLE LITERAL+] Dovecot ready.\r\n"
-        )
-
-    cmd = data.strip().upper()
-    if cmd.endswith(b"CAPABILITY"):
-        return (
-            b"* CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS "
-            b"ID ENABLE IDLE LITERAL+\r\n"
-            b"a001 OK Pre-login capabilities listed, post-login "
-            b"capabilities have more.\r\n"
-        )
-    if cmd.endswith(b"LOGOUT"):
-        return b"* BYE Logging out\r\na001 OK Logout completed.\r\n"
-    return b"a001 NO Unknown command.\r\n"
-
-
-def handle_ssh(_data: bytes) -> bytes:
-    """SSH banner, sent on connect."""
-    return b"SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19\r\n"
-
-
-HANDLERS: dict[str, Handler] = {
-    "redis": handle_redis,
-    "memcached": handle_memcached,
-    "etcd": handle_etcd,
-    "ci-runner": handle_ci_runner,
-    "mysql": handle_mysql,
-    "postgres": handle_postgres,
-    "mqtt": handle_mqtt,
-    "amqp": handle_amqp,
-    "smtp": handle_smtp,
-    "pop3": handle_pop3,
-    "imap": handle_imap,
-    "ssh": handle_ssh,
+# Well-known ports for each service.
+KNOWN_PORTS: dict[int, str] = {
+    21: "ftp",
+    22: "ssh",
+    25: "smtp",
+    53: "dns",
+    80: "http",
+    110: "pop3",
+    143: "imap",
+    443: "https",
+    465: "smtps",
+    587: "smtp-submission",
+    993: "imaps",
+    995: "pop3s",
+    1433: "mssql",
+    1521: "oracle",
+    2375: "docker-daemon",
+    2379: "etcd",
+    3000: "grafana",
+    3306: "mysql",
+    4222: "nats",
+    5000: "docker-registry",
+    5432: "postgres",
+    5601: "kibana",
+    5672: "rabbitmq-amqp",
+    6379: "redis",
+    6443: "k8s-api",
+    8080: "http-alt",
+    9000: "portainer",
+    9090: "prometheus",
+    9092: "kafka",
+    9093: "alertmanager",
+    9200: "elasticsearch",
+    10250: "kubelet",
+    11211: "memcached",
+    15672: "rabbitmq-mgmt",
+    27017: "mongodb",
 }
 
+# Ports where TLS is required by protocol convention.
+TLS_ONLY_PORTS: set[int] = {465, 636, 993, 995, 8443}
 
-# ============================================================
-# Signature library
-# ============================================================
 
 SIGNATURES: dict[str, dict] = {
-
-    # Full SSH handshake (requires asyncssh). Runs a real KEX and
-    # rejects all auth — no shell, no exec, no access.
-    "ssh-full-handshake": {
-        "ssh_full": True,
-        "ssh_version": "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
-    },
-    "ssh-full-handshake-debian": {
-        "ssh_full": True,
-        "ssh_version": "OpenSSH_9.2p1 Debian-2+deb12u2",
-    },
-    
     # --------------------------------------------------------
     # Web servers
     # --------------------------------------------------------
     "nginx-welcome": {
         "status": "200 OK",
-        "headers": {
-            "Content-Type": "text/html",
-            "Server": "nginx",
-        },
+        "headers": {"Content-Type": "text/html", "Server": "nginx"},
         "body": (
             "<!DOCTYPE html>\n"
             "<html>\n"
@@ -366,10 +70,7 @@ SIGNATURES: dict[str, dict] = {
     },
     "nginx-404": {
         "status": "404 Not Found",
-        "headers": {
-            "Content-Type": "text/html",
-            "Server": "nginx",
-        },
+        "headers": {"Content-Type": "text/html", "Server": "nginx"},
         "body": (
             "<html>\r\n"
             "<head><title>404 Not Found</title></head>\r\n"
@@ -771,10 +472,7 @@ SIGNATURES: dict[str, dict] = {
         ),
     },
     "mosquitto": {"handler": "mqtt"},
-    "beanstalkd": {
-        "raw": True,
-        "body": "OK 42\r\n",
-    },
+    "beanstalkd": {"raw": True, "body": "OK 42\r\n"},
 
     # --------------------------------------------------------
     # Data stores
@@ -784,6 +482,7 @@ SIGNATURES: dict[str, dict] = {
     "mysql": {"handler": "mysql"},
     "mariadb": {"handler": "mysql"},
     "postgres": {"handler": "postgres"},
+    "mongodb": {"handler": "mongodb"},
     "clickhouse": {
         "status": "200 OK",
         "headers": {
@@ -844,12 +543,11 @@ SIGNATURES: dict[str, dict] = {
         "raw": True,
         "body": "220 mail.example.com ESMTP Exim 4.96 Ubuntu\r\n",
     },
-    "smtps": {
-        "tls": True,
-        "handler": "smtp",
-    },
+    "smtps": {"tls": True, "handler": "smtp"},
     "pop3-dovecot": {"handler": "pop3"},
     "imap-dovecot": {"handler": "imap"},
+    "pop3s-dovecot": {"tls": True, "handler": "pop3"},
+    "imaps-dovecot": {"tls": True, "handler": "imap"},
 
     # --------------------------------------------------------
     # Directory, network services
@@ -866,13 +564,10 @@ SIGNATURES: dict[str, dict] = {
         "raw": True,
         "body": b"\x1c\x01\x00\xe9\x00\x00\x00\x00\x00\x00\x00\x00",
     },
-    "rsync": {
-        "raw": True,
-        "body": "@RSYNCD: 31.0\n",
-    },
+    "rsync": {"raw": True, "body": "@RSYNCD: 31.0\n"},
 
     # --------------------------------------------------------
-    # SSH banners
+    # SSH banners (raw, no handshake)
     # --------------------------------------------------------
     "ssh-openssh-9-ubuntu": {
         "raw": True,
@@ -896,12 +591,21 @@ SIGNATURES: dict[str, dict] = {
     },
 
     # --------------------------------------------------------
+    # SSH full handshake (asyncssh)
+    # --------------------------------------------------------
+    "ssh-full-handshake": {
+        "ssh_full": True,
+        "ssh_version": "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
+    },
+    "ssh-full-handshake-debian": {
+        "ssh_full": True,
+        "ssh_version": "OpenSSH_9.2p1 Debian-2+deb12u2",
+    },
+
+    # --------------------------------------------------------
     # Legacy banners
     # --------------------------------------------------------
-    "ftp-vsftpd": {
-        "raw": True,
-        "body": "220 (vsFTPd 3.0.5)\r\n",
-    },
+    "ftp-vsftpd": {"raw": True, "body": "220 (vsFTPd 3.0.5)\r\n"},
     "ftp-proftpd": {
         "raw": True,
         "body": (
@@ -920,12 +624,6 @@ SIGNATURES: dict[str, dict] = {
             "Looking up your hostname...\r\n"
         ),
     },
-    "vnc-rfb": {
-        "raw": True,
-        "body": "RFB 003.008\n",
-    },
-    "socks5": {
-        "raw": True,
-        "body": b"\x05\x00",
-    },
+    "vnc-rfb": {"raw": True, "body": "RFB 003.008\n"},
+    "socks5": {"raw": True, "body": b"\x05\x00"},
 }

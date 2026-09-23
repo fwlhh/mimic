@@ -342,20 +342,72 @@ done
 - Responses are static — no shell, no `eval`, no dynamic code.
 - TLS private keys are readable only by the service group.
 
+## Project layout
+
+```text
+mimic/
+├── mimic.py              entrypoint and CLI
+├── signatures/           protocol handlers and service library
+│   ├── __init__.py       public API (HANDLERS, SIGNATURES, ...)
+│   ├── _common.py        shared HTTP helpers
+│   ├── redis.py          RESP protocol
+│   ├── postgres.py       PostgreSQL wire protocol
+│   ├── mongodb.py        BSON + isMaster
+│   ├── mysql.py          greeting packet
+│   ├── memcached.py      text protocol
+│   ├── smtp.py           SMTP dialogue
+│   ├── pop3.py           POP3 dialogue
+│   ├── imap.py           IMAP dialogue
+│   ├── http_handlers.py  etcd, CI runner
+│   ├── mqtt.py           MQTT, AMQP, SSH banner
+│   ├── ssh.py            full SSH handshake (asyncssh)
+│   └── library.py        SIGNATURES, KNOWN_PORTS, TLS_ONLY_PORTS
+├── presets/              ready-made configs
+├── systemd/              systemd unit
+└── scripts/              install, uninstall, certbot hook
+```
+
 ## Adding a new signature
 
-Edit `signatures.py`, add an entry to `SIGNATURES`:
+**Simple HTTP or raw banner** — add an entry to the `SIGNATURES`
+dict in `signatures/library.py`:
 
 ```python
 "my-service": {
     "status": "200 OK",
     "headers": {"Content-Type": "text/plain"},
     "body": "hello\n",
+},
+```
+
+**Stateful protocol** — create a new module in `signatures/`, for
+example `signatures/myproto.py`:
+
+```python
+def handle_myproto(data: bytes) -> bytes:
+    ...
+```
+
+Then register it in `signatures/__init__.py`:
+
+```python
+from .myproto import handle_myproto
+
+HANDLERS = {
+    ...
+    "myproto": handle_myproto,
 }
 ```
 
-For state-aware protocols, add a handler to `HANDLERS` and reference
-it with `{ "handler": "my-service" }`.
+And reference it from `signatures/library.py`:
+
+```python
+"my-service": {"handler": "myproto"},
+```
+
+**Shared HTTP helpers** live in `signatures/_common.py`:
+`build_http_response`, `build_raw_response`, `is_http`,
+`is_proxy_like`, `http_400`.
 
 ## Development
 

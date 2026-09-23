@@ -28,3 +28,14 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "signatures.py" = ["E501"]  # HTML/JSON bodies
+
+[tool.setuptools]
+py-modules = ["mimic", "ssh_server"]
+packages = ["signatures"]
+
+[tool.setuptools.package-data]
+signatures = ["*.py"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
