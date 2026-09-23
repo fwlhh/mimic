@@ -10,6 +10,7 @@
     "key_file": "/opt/mimic/certs/domain/privkey.pem"
   },
   "services": [
+    { "port": 22,    "service": "ssh-full-handshake" },
     { "port": 2379,  "service": "etcd" },
     { "port": 3000,  "service": "grafana" },
     { "port": 5000,  "service": "docker-registry" },

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Stop and remove Mimic. Prompts before deleting data directories.
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/mimic}"

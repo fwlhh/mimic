@@ -1,5 +1,5 @@
 [Unit]
-Description=Mimic — lightweight port spoofer
+Description=Mimic -- lightweight port spoofer
 After=network.target
 
 [Service]
@@ -14,7 +14,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/mimic
+ReadWritePaths=/etc/mimic /opt/mimic
 
 [Install]
 WantedBy=multi-user.target

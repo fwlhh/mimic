@@ -128,6 +128,71 @@ one subdirectory per domain:
     ├── fullchain.pem
     └── privkey.pem
 ```
+## SSH full handshake
+
+Regular SSH signatures (`ssh-openssh-9-ubuntu` and friends) send only
+a banner and close the connection. Port scanners like `nmap` see an
+SSH server, but deeper fingerprinting tools — Censys, Shodan, custom
+HASSH collectors — see that the host key exchange never happens and
+flag the host as a honeypot.
+
+For port 22 use the `ssh-full-handshake` signature instead. It runs a
+real SSH server (via `asyncssh`) that:
+
+- Sends a plausible SSH banner.
+- Performs a full KEX (curve25519-sha256, etc.).
+- Presents a real host key (ed25519 + rsa).
+- Responds to auth attempts — and rejects **every** one of them.
+- Never opens a shell, never executes a command.
+
+To a scanner, it looks exactly like a hardened production SSH server
+with password auth disabled. To anyone trying to log in, it looks
+like they typed the wrong password.
+
+### Requirements
+
+- `asyncssh` (`sudo apt install python3-asyncssh`).
+- Host keys in `/opt/mimic/`:
+  - `ssh_host_ed25519_key`
+  - `ssh_host_rsa_key`
+
+`install.sh` installs `asyncssh` and generates both keys if they are
+missing.
+
+### Config
+
+```json
+{
+  "services": [
+    { "port": 22, "service": "ssh-full-handshake" }
+  ]
+}
+```
+
+### Verify
+
+```bash
+# Should print the banner, then prompt for a password
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -p 22 root@your-server
+
+# Should show both host keys
+ssh-keyscan -p 22 your-server
+```
+
+Any password returns `Permission denied`. No shell is ever opened.
+
+### Key rotation
+
+Do **not** regenerate host keys unless you want to look like a
+different server. Censys tracks host key fingerprints — a new key
+means a new host in their index.
+
+### Raw banner signatures
+
+The `ssh-openssh-*` signatures (raw banner only) are still useful for
+non-standard ports — for example, a fake SSH on port 2222 that
+nobody scans deeply. They do **not** survive HASSH fingerprinting.
 
 ### Automatic setup
 

@@ -23,6 +23,7 @@ install -d "$CERT_DIR"
 
 install -m 0755 "$SRC_DIR/mimic.py"      "$PREFIX/mimic.py"
 install -m 0644 "$SRC_DIR/signatures.py" "$PREFIX/signatures.py"
+install -m 0644 "$SRC_DIR/ssh_server.py" "$PREFIX/ssh_server.py"
 
 if compgen -G "$SRC_DIR/presets/*.json" > /dev/null; then
     install -m 0644 "$SRC_DIR"/presets/*.json "$PREFIX/presets/"
@@ -30,6 +31,32 @@ fi
 
 echo "==> Installing CLI wrapper at $BIN_LINK"
 ln -sf "$PREFIX/mimic.py" "$BIN_LINK"
+
+echo "==> Checking asyncssh (needed for full SSH handshake)"
+if ! python3 -c "import asyncssh" 2>/dev/null; then
+    echo "    asyncssh not found, installing..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y python3-asyncssh
+    else
+        pip3 install asyncssh
+    fi
+else
+    echo "    asyncssh already installed"
+fi
+
+echo "==> Generating SSH host keys (if missing)"
+if [[ ! -f "$PREFIX/ssh_host_ed25519_key" ]]; then
+    ssh-keygen -t ed25519 -f "$PREFIX/ssh_host_ed25519_key" -N "" -q
+    echo "    generated ed25519 key"
+fi
+if [[ ! -f "$PREFIX/ssh_host_rsa_key" ]]; then
+    ssh-keygen -t rsa -b 4096 -f "$PREFIX/ssh_host_rsa_key" -N "" -q
+    echo "    generated rsa key"
+fi
+
+chown root:nogroup "$PREFIX"/ssh_host_*_key*
+chmod 640 "$PREFIX"/ssh_host_*_key
+chmod 644 "$PREFIX"/ssh_host_*_key.pub
 
 echo "==> Creating config directory $CONFIG_DIR"
 install -d -m 0755 "$CONFIG_DIR"
@@ -53,10 +80,7 @@ for lineage in "$LETSENCRYPT_LIVE"/*/; do
     domain="$(basename "$lineage")"
     src_chain="$lineage/fullchain.pem"
     src_key="$lineage/privkey.pem"
-
-    if [[ ! -f "$src_chain" || ! -f "$src_key" ]]; then
-        continue
-    fi
+    [[ -f "$src_chain" && -f "$src_key" ]] || continue
 
     dst_dir="$CERT_DIR/$domain"
     install -d -m 0750 -o root -g nogroup "$dst_dir"
@@ -73,12 +97,7 @@ for lineage in "$LETSENCRYPT_LIVE"/*/; do
 done
 shopt -u nullglob
 
-if [[ $FOUND -eq 0 ]]; then
-    echo "    no certificates found; skipping"
-    echo "    (add TLS certs later to $CERT_DIR/<domain>/)"
-else
-    echo "    copied $FOUND domain(s)"
-fi
+[[ $FOUND -eq 0 ]] && echo "    no certificates found; skipping"
 
 # --- Install certbot deploy hook ---
 if [[ -d /etc/letsencrypt/renewal-hooks/deploy ]]; then
@@ -86,8 +105,6 @@ if [[ -d /etc/letsencrypt/renewal-hooks/deploy ]]; then
     install -m 0755 \
         "$SRC_DIR/scripts/mimic-copy-certs.sh" \
         /etc/letsencrypt/renewal-hooks/deploy/mimic-copy-certs.sh
-else
-    echo "==> certbot not installed; skipping deploy hook"
 fi
 
 echo

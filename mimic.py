@@ -2,8 +2,9 @@
 """Mimic -- a lightweight, dependency-free port spoofer.
 
 Listens on configured TCP ports and returns realistic banners and
-HTTP responses imitating real services. Useful for disguising a VPS,
-running decoys, or reducing the value of automated port scans.
+HTTP responses imitating real services. Optionally runs a full SSH
+handshake server (requires asyncssh) for ports that must survive
+deep fingerprinting like Censys or Shodan.
 
 See README.md for usage.
 """
@@ -65,7 +66,13 @@ DEFAULT_HANDLER_TIMEOUT = 1.0
 # ============================================================
 
 class SpoofServer:
-    """One spoofed service bound to one TCP port."""
+    """One spoofed service bound to one TCP port.
+
+    Modes:
+      - static HTTP/raw: sends a fixed response
+      - handler: calls a protocol handler per connection
+      - ssh-full: runs a full SSH handshake server (asyncssh)
+    """
 
     def __init__(
         self,
@@ -81,6 +88,8 @@ class SpoofServer:
         max_conns: int = DEFAULT_MAX_CONNS,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         handler_timeout: float = DEFAULT_HANDLER_TIMEOUT,
+        ssh_full: bool = False,
+        ssh_version: str = "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
     ) -> None:
         self.name = name
         self.port = port
@@ -94,12 +103,16 @@ class SpoofServer:
         self.max_conns = max_conns
         self.read_timeout = read_timeout
         self.handler_timeout = handler_timeout
+        self.ssh_full = ssh_full
+        self.ssh_version = ssh_version
         self.server: asyncio.AbstractServer | None = None
         self.ssl_context: ssl.SSLContext | None = None
+        self.ssh_acceptor: Any = None
         self._connections: dict[str, int] = {}
 
+    # ---------- TLS ----------
+
     def _build_ssl_context(self) -> ssl.SSLContext | None:
-        """Build an SSL context if TLS is enabled."""
         if not self.tls:
             return None
         if not self.cert_file or not self.key_file:
@@ -119,12 +132,13 @@ class SpoofServer:
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         return ctx
 
+    # ---------- Static / handler modes ----------
+
     async def _handle_client(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Handle one client connection."""
         peer = writer.get_extra_info("peername")
         peer_ip = peer[0] if peer else "unknown"
 
@@ -149,7 +163,6 @@ class SpoofServer:
                 await self._serve_handler(reader, writer)
             else:
                 await self._serve_static(reader, writer)
-
             log.info(
                 "[%s:%d] served %s",
                 self.name,
@@ -181,7 +194,6 @@ class SpoofServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Run the protocol handler for one round."""
         assert self.handler is not None
         try:
             data = await asyncio.wait_for(
@@ -190,7 +202,6 @@ class SpoofServer:
             )
         except asyncio.TimeoutError:
             data = b""
-
         response = self.handler(data)
         if response:
             writer.write(response)
@@ -201,7 +212,6 @@ class SpoofServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Send the static response for this service."""
         try:
             await asyncio.wait_for(
                 reader.read(4096),
@@ -209,15 +219,41 @@ class SpoofServer:
             )
         except asyncio.TimeoutError:
             pass
-
         if self.delay:
             await asyncio.sleep(self.delay)
-
         writer.write(self.response)
         await writer.drain()
 
+    # ---------- SSH full-handshake mode ----------
+
+    async def _start_ssh(self) -> None:
+        try:
+            from ssh_server import start_ssh_server
+        except ImportError:
+            log.error(
+                "[%s] ssh_full requires the 'asyncssh' package. "
+                "Install with: sudo apt install python3-asyncssh",
+                self.name,
+            )
+            sys.exit(1)
+
+        self.ssh_acceptor = await start_ssh_server(
+            port=self.port,
+            server_version=self.ssh_version,
+        )
+        log.info(
+            "listening on :%d as %s [ssh-full]",
+            self.port,
+            self.name,
+        )
+
+    # ---------- Lifecycle ----------
+
     async def start(self) -> None:
-        """Start listening on the configured port."""
+        if self.ssh_full:
+            await self._start_ssh()
+            return
+
         self.ssl_context = self._build_ssl_context()
         self.server = await asyncio.start_server(
             self._handle_client,
@@ -236,7 +272,10 @@ class SpoofServer:
         )
 
     async def stop(self) -> None:
-        """Stop the server and close all connections."""
+        if self.ssh_full and self.ssh_acceptor is not None:
+            self.ssh_acceptor.close()
+            await self.ssh_acceptor.wait_closed()
+            return
         if self.server:
             self.server.close()
             await self.server.wait_closed()
@@ -247,7 +286,6 @@ class SpoofServer:
 # ============================================================
 
 def load_config(path: Path) -> dict[str, Any]:
-    """Load and parse a JSON config file."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -259,7 +297,6 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def merge_service_spec(spec: dict[str, Any]) -> dict[str, Any]:
-    """Resolve a service spec against a signature, if present."""
     sig_name = spec.get("service")
     if not sig_name:
         return dict(spec)
@@ -284,7 +321,6 @@ def _resolve_handler(
     spec: dict[str, Any],
     name: str,
 ) -> Handler | None:
-    """Resolve the handler for a service spec, if any."""
     handler_name = spec.get("handler")
     if not handler_name:
         return None
@@ -297,7 +333,6 @@ def _resolve_handler(
 
 
 def _build_response(spec: dict[str, Any]) -> bytes:
-    """Build the static response bytes for a service spec."""
     if spec.get("raw"):
         return build_raw_response(spec.get("body", ""))
     return build_http_response(
@@ -308,7 +343,6 @@ def _build_response(spec: dict[str, Any]) -> bytes:
 
 
 def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
-    """Build the list of SpoofServer instances from a config dict."""
     settings = cfg.get("settings", {})
     tls_cfg = cfg.get("tls", {})
 
@@ -335,8 +369,9 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
         port = int(spec["port"])
         name = spec.get("name", f"port-{port}")
         handler = _resolve_handler(spec, name)
+        ssh_full = bool(spec.get("ssh_full", False))
 
-        if handler is not None:
+        if handler is not None or ssh_full:
             response_bytes = b""
         else:
             response_bytes = _build_response(spec)
@@ -355,6 +390,11 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
                 max_conns=max_conns,
                 read_timeout=read_timeout,
                 handler_timeout=handler_timeout,
+                ssh_full=ssh_full,
+                ssh_version=spec.get(
+                    "ssh_version",
+                    "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19",
+                ),
             )
         )
     return servers
@@ -365,7 +405,6 @@ def build_servers(cfg: dict[str, Any]) -> list[SpoofServer]:
 # ============================================================
 
 async def run_servers(cfg: dict[str, Any]) -> None:
-    """Start all servers and wait for a shutdown signal."""
     servers = build_servers(cfg)
     if not servers:
         raise SystemExit("No services configured")
@@ -399,7 +438,6 @@ async def run_servers(cfg: dict[str, Any]) -> None:
 # ============================================================
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Run the spoofer with the given config file."""
     cfg_path = Path(args.config).resolve()
     if not cfg_path.exists():
         print(f"config not found: {cfg_path}", file=sys.stderr)
@@ -417,7 +455,6 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_list_presets(_: argparse.Namespace) -> int:
-    """Print available preset names."""
     if not PRESETS_DIR.exists():
         print("no presets directory found")
         return 1
@@ -427,10 +464,11 @@ def cmd_list_presets(_: argparse.Namespace) -> int:
 
 
 def cmd_list_signatures(_: argparse.Namespace) -> int:
-    """Print available signature names and kinds."""
     for name in sorted(SIGNATURES):
         sig = SIGNATURES[name]
-        if "handler" in sig:
+        if sig.get("ssh_full"):
+            kind = "ssh-full"
+        elif "handler" in sig:
             kind = "handler"
         elif sig.get("raw"):
             kind = "raw"
@@ -442,7 +480,6 @@ def cmd_list_signatures(_: argparse.Namespace) -> int:
 
 
 def cmd_show_signature(args: argparse.Namespace) -> int:
-    """Print one signature as JSON."""
     sig = SIGNATURES.get(args.name)
     if sig is None:
         print(f"unknown signature: {args.name}", file=sys.stderr)
@@ -452,7 +489,6 @@ def cmd_show_signature(args: argparse.Namespace) -> int:
 
 
 def cmd_gen_config(args: argparse.Namespace) -> int:
-    """Generate a config file from a preset."""
     preset_path = PRESETS_DIR / f"{args.preset}.json"
     if not preset_path.exists():
         print(f"preset not found: {preset_path}", file=sys.stderr)
@@ -502,7 +538,6 @@ def cmd_gen_config(args: argparse.Namespace) -> int:
 # ============================================================
 
 def build_argparser() -> argparse.ArgumentParser:
-    """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
         prog="mimic",
         description="Lightweight port spoofer for disguising servers.",
@@ -523,39 +558,26 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="cmd", required=False)
 
-    p_run = sub.add_parser(
-        "run",
-        help="run the spoofer with a config file",
-    )
-    p_run.add_argument(
-        "--config",
-        "-c",
-        default=str(DEFAULT_CONFIG),
-    )
+    p_run = sub.add_parser("run", help="run the spoofer with a config file")
+    p_run.add_argument("--config", "-c", default=str(DEFAULT_CONFIG))
     p_run.set_defaults(func=cmd_run)
 
-    p_lp = sub.add_parser(
-        "list-presets",
-        help="list bundled presets",
-    )
+    p_lp = sub.add_parser("list-presets", help="list bundled presets")
     p_lp.set_defaults(func=cmd_list_presets)
 
     p_ls = sub.add_parser(
-        "list-signatures",
-        help="list built-in signatures",
+        "list-signatures", help="list built-in signatures"
     )
     p_ls.set_defaults(func=cmd_list_signatures)
 
     p_ss = sub.add_parser(
-        "show-signature",
-        help="show one signature as JSON",
+        "show-signature", help="show one signature as JSON"
     )
     p_ss.add_argument("name")
     p_ss.set_defaults(func=cmd_show_signature)
 
     p_gen = sub.add_parser(
-        "gen-config",
-        help="generate a config from a preset",
+        "gen-config", help="generate a config from a preset"
     )
     p_gen.add_argument("--preset", required=True)
     p_gen.add_argument("--output", "-o", required=True)
@@ -566,7 +588,6 @@ def build_argparser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point."""
     parser = build_argparser()
     args = parser.parse_args(argv)
 
