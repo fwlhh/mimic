@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Stop and remove Mimic. Prompts before deleting data directories.
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/mimic}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/mimic}"
+BIN_LINK="${BIN_LINK:-/usr/local/bin/mimic}"
 
 if [[ $EUID -ne 0 ]]; then
     echo "This script must be run as root." >&2
@@ -17,6 +17,9 @@ systemctl disable mimic 2>/dev/null || true
 echo "==> Removing systemd unit"
 rm -f /etc/systemd/system/mimic.service
 systemctl daemon-reload
+
+echo "==> Removing CLI wrapper"
+rm -f "$BIN_LINK"
 
 read -rp "Remove $PREFIX and $CONFIG_DIR? [y/N] " ans
 if [[ "${ans,,}" == "y" ]]; then

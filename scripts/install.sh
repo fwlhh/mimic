@@ -6,6 +6,7 @@ PREFIX="${PREFIX:-/opt/mimic}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/mimic}"
 CERT_DIR="${CERT_DIR:-/opt/mimic/certs}"
 LETSENCRYPT_LIVE="${LETSENCRYPT_LIVE:-/etc/letsencrypt/live}"
+BIN_LINK="${BIN_LINK:-/usr/local/bin/mimic}"
 
 if [[ $EUID -ne 0 ]]; then
     echo "This script must be run as root." >&2
@@ -26,6 +27,9 @@ install -m 0644 "$SRC_DIR/signatures.py" "$PREFIX/signatures.py"
 if compgen -G "$SRC_DIR/presets/*.json" > /dev/null; then
     install -m 0644 "$SRC_DIR"/presets/*.json "$PREFIX/presets/"
 fi
+
+echo "==> Installing CLI wrapper at $BIN_LINK"
+ln -sf "$PREFIX/mimic.py" "$BIN_LINK"
 
 echo "==> Creating config directory $CONFIG_DIR"
 install -d -m 0755 "$CONFIG_DIR"
@@ -89,8 +93,7 @@ fi
 echo
 echo "Done. Next steps:"
 echo "  1. Edit $CONFIG_DIR/config.json"
-echo "     Point tls.cert_file / tls.key_file at a domain subdirectory:"
-echo "       $CERT_DIR/<domain>/fullchain.pem"
-echo "       $CERT_DIR/<domain>/privkey.pem"
 echo "  2. systemctl enable --now mimic"
 echo "  3. journalctl -u mimic -f"
+echo
+echo "CLI available as: mimic --help"
