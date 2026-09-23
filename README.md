@@ -151,22 +151,22 @@ like they typed the wrong password.
 
 ### Requirements
 
-- `asyncssh` (`sudo apt install python3-asyncssh`).
+- `asyncssh` **>= 2.15** (older versions lack post-quantum KEX and
+  will not start if `sntrup761x25519-sha512@openssh.com` is in the
+  algorithm list).
 - Host keys in `/opt/mimic/`:
   - `ssh_host_ed25519_key`
   - `ssh_host_rsa_key`
 
-`install.sh` installs `asyncssh` and generates both keys if they are
-missing.
+`install.sh` handles both: it upgrades `asyncssh` via pip if the
+system package is older than 2.15, and generates both host keys if
+they are missing.
 
-### Config
+If you install Mimic manually, upgrade asyncssh yourself:
 
-```json
-{
-  "services": [
-    { "port": 22, "service": "ssh-full-handshake" }
-  ]
-}
+```bash
+sudo apt install python3-pip
+sudo pip3 install --upgrade --break-system-packages 'asyncssh>=2.15'
 ```
 
 ### Verify

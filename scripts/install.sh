@@ -32,18 +32,30 @@ fi
 echo "==> Installing CLI wrapper at $BIN_LINK"
 ln -sf "$PREFIX/mimic.py" "$BIN_LINK"
 
-echo "==> Checking asyncssh (needed for full SSH handshake)"
-if ! python3 -c "import asyncssh" 2>/dev/null; then
-    echo "    asyncssh not found, installing..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get install -y python3-asyncssh
-    else
-        pip3 install asyncssh
-    fi
+# --- asyncssh -----------------------------------------------------------
+# Full SSH handshake needs asyncssh >= 2.15 for post-quantum KEX
+# (sntrup761x25519-sha512@openssh.com). Ubuntu 24.04 ships 2.14.2,
+# which lacks it, so we upgrade via pip if the installed version is
+# too old. The system Python finds the pip-installed copy in
+# /usr/local/lib/python*/dist-packages/ automatically.
+echo "==> Checking asyncssh version (need >= 2.15)"
+if python3 -c "import asyncssh, sys; \
+               sys.exit(0 if tuple(map(int, asyncssh.__version__.split('.')[:2])) >= (2, 15) else 1)" \
+        2>/dev/null; then
+    echo "    asyncssh already >= 2.15, skipping"
 else
-    echo "    asyncssh already installed"
+    echo "    installing/upgrading asyncssh via pip..."
+    if ! command -v pip3 >/dev/null 2>&1; then
+        apt-get install -y python3-pip
+    fi
+    # --ignore-installed: Ubuntu's system cryptography (41.x) was
+    # installed by apt and pip cannot uninstall it. Install a newer
+    # copy into /usr/local/lib, which takes precedence on import.
+    pip3 install --upgrade --break-system-packages --ignore-installed \
+        'asyncssh>=2.15'
 fi
 
+# --- SSH host keys ------------------------------------------------------
 echo "==> Generating SSH host keys (if missing)"
 if [[ ! -f "$PREFIX/ssh_host_ed25519_key" ]]; then
     ssh-keygen -t ed25519 -f "$PREFIX/ssh_host_ed25519_key" -N "" -q
@@ -58,6 +70,7 @@ chown root:nogroup "$PREFIX"/ssh_host_*_key*
 chmod 640 "$PREFIX"/ssh_host_*_key
 chmod 644 "$PREFIX"/ssh_host_*_key.pub
 
+# --- Config -------------------------------------------------------------
 echo "==> Creating config directory $CONFIG_DIR"
 install -d -m 0755 "$CONFIG_DIR"
 if [[ ! -f "$CONFIG_DIR/config.json" ]]; then
@@ -67,12 +80,13 @@ fi
 chown root:nogroup "$CONFIG_DIR/config.json"
 chmod 640 "$CONFIG_DIR/config.json"
 
+# --- systemd ------------------------------------------------------------
 echo "==> Installing systemd unit"
 install -m 0644 "$SRC_DIR/systemd/mimic.service" \
         /etc/systemd/system/mimic.service
 systemctl daemon-reload
 
-# --- Copy existing certificates, one subdirectory per domain ---
+# --- Certificates -------------------------------------------------------
 echo "==> Looking for certificates in $LETSENCRYPT_LIVE"
 shopt -s nullglob
 FOUND=0
@@ -99,7 +113,7 @@ shopt -u nullglob
 
 [[ $FOUND -eq 0 ]] && echo "    no certificates found; skipping"
 
-# --- Install certbot deploy hook ---
+# --- Certbot hook -------------------------------------------------------
 if [[ -d /etc/letsencrypt/renewal-hooks/deploy ]]; then
     echo "==> Installing certbot deploy hook"
     install -m 0755 \

@@ -6,7 +6,8 @@ scanners like Censys and Shodan see a real SSH server. All auth
 attempts are rejected -- no shell, no exec, no access.
 
 Algorithm lists are pinned to match Ubuntu 24.04's OpenSSH 9.6p1
-defaults, so the fingerprint is indistinguishable from a real server.
+defaults. Requires asyncssh >= 2.15 for post-quantum KEX support;
+older versions silently drop sntrup761x25519-sha512@openssh.com.
 """
 
 from __future__ import annotations
@@ -27,11 +28,9 @@ DEFAULT_HOST_KEYS = (
 DEFAULT_SERVER_VERSION = "OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"
 
 # --- Algorithm lists matching Ubuntu 24.04 OpenSSH 9.6p1 defaults ---
-# Source: `sshd -T | grep -E '(kex|key|ciphers|macs)algorithms'`
+# Source: sshd -T | grep -E '(kex|key|ciphers|macs)algorithms'
 
 KEX_ALGS = [
-    # sntrup761x25519-sha512@openssh.com — может отсутствовать в старых
-    # сборках asyncssh. Если сервис не запустится, уберите эту строку.
     "sntrup761x25519-sha512@openssh.com",
     "curve25519-sha256",
     "curve25519-sha256@libssh.org",
@@ -44,8 +43,7 @@ KEX_ALGS = [
     "diffie-hellman-group14-sha256",
 ]
 
-# signature_algs управляет алгоритмами подписи host key и аутентификации
-# по открытому ключу. Список соответствует OpenSSH 9.6p1 по умолчанию.
+# signature_algs controls host key and public key signature algorithms.
 SIGNATURE_ALGS = [
     "ssh-ed25519",
     "rsa-sha2-512",
